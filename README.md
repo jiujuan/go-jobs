@@ -1,2 +1,2 @@
-# elastic-cron
+# litecron
 cron like linux crontab
