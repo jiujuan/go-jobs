@@ -4,3 +4,10 @@ import:
   version: ~1.3.0
 - package: github.com/jakecoffman/cron
   version: ~1.0.0
+- package: golang.org/x/sys
+  repo: https://github.com/golang/sys
+  vcs: git
+  subpackages:
+     - unix
+ignore:
+- flag
