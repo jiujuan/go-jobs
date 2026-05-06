@@ -3,12 +3,15 @@
 package executor_handler
 
 import (
+	"errors"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/jiujuan/go-jobs/api/response"
 	"github.com/jiujuan/go-jobs/internal/executor"
+	"github.com/jiujuan/go-jobs/pkg/idempotency"
+	"github.com/jiujuan/go-jobs/pkg/xerror"
 )
 
 // ExecutorHTTPHandler exposes executor endpoints: /run, /kill, /beat, /idleBeat.
@@ -22,6 +25,12 @@ func NewExecutorHTTPHandler(runner *executor.Runner) *ExecutorHTTPHandler {
 }
 
 // Run handles POST /executor/run (trigger a job).
+//
+// 幂等语义：
+//   - 200 OK：首次执行成功，或幂等重复（已成功完成）。
+//   - 409 Conflict (ErrAlreadyRunning)：相同 LogID 正在执行，调度器不应重试同一 LogID。
+//   - 503 Service Unavailable (ErrRunnerStopped)：executor 正在优雅关闭，调度器应路由到其他实例。
+//   - 5xx：执行失败（含已失败完成后的幂等重复请求，返回原始错误）。
 func (h *ExecutorHTTPHandler) Run(c *gin.Context) {
 	var req executor.RunRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -29,7 +38,16 @@ func (h *ExecutorHTTPHandler) Run(c *gin.Context) {
 		return
 	}
 	if err := h.runner.Run(c.Request.Context(), &req); err != nil {
-		response.Fail(c, err)
+		switch {
+		case errors.Is(err, idempotency.ErrAlreadyRunning):
+			// 幂等冲突：相同 LogID 已在运行，返回 409
+			response.Fail(c, xerror.New(xerror.CodeDuplicateExecution))
+		case errors.Is(err, executor.ErrRunnerStopped):
+			// executor 正在优雅关闭，返回 503 让调度器路由到其他实例
+			response.Fail(c, xerror.New(xerror.CodeExecutorDraining))
+		default:
+			response.Fail(c, err)
+		}
 		return
 	}
 	response.OK(c, nil)
