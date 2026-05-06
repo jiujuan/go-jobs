@@ -15,6 +15,7 @@ import (
 	"github.com/jiujuan/go-jobs/internal/scheduler"
 	"github.com/jiujuan/go-jobs/pkg/logger"
 	"github.com/jiujuan/go-jobs/pkg/xerror"
+	"github.com/jiujuan/go-jobs/pkg/utils"
 )
 
 // JobService handles all job-related business logic.
@@ -353,5 +354,34 @@ func (s *JobService) ReportResult(ctx context.Context, logID int64, status model
 			logger.Warn("failed to save log detail", zap.Int64("logID", logID), zap.Error(err))
 		}
 	}
+
+	// v3: 如果任务成功，触发子任务
+	if status == model.LogSuccess {
+		if log, err := s.logDAO.FindByID(ctx, logID); err == nil {
+			if job, err := s.jobDAO.FindByID(ctx, log.JobID); err == nil && job.ChildJobIDs != "" {
+				for _, childID := range utils.StringToInt64Slice(job.ChildJobIDs) {
+					if trigErr := s.sched.TriggerJob(ctx, childID, log.ExecuteParam); trigErr != nil {
+						logger.Warn("child job trigger failed",
+							zap.Int64("parentJobID", job.ID),
+							zap.Int64("childJobID", childID),
+							zap.Error(trigErr))
+					} else {
+						logger.Info("child job triggered",
+							zap.Int64("parentJobID", job.ID),
+							zap.Int64("childJobID", childID))
+					}
+				}
+			}
+		}
+	}
+
 	return nil
 }
+
+// ─── v3: 子任务触发 (由 ReportResult 调用) ──────────────────────────────────
+
+// triggerChildJobs 在父任务成功时，触发 child_job_ids 中配置的所有子任务。
+// 供 ReportResult 调用，不应直接调用。
+func (s *JobService) triggerChildJobs(ctx context.Context, parentJobID int64, childJobIDsStr, param string) {
+	if childJobIDsStr == "" {
+		return
