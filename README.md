@@ -34,7 +34,7 @@ go-jobs-admin (Vue3 Web UI)
 |------|------|
 | 语言 | Go 1.21+ |
 | Web 框架 | Gin |
-| 配置 | Viper (functional options) |
+| 配置 | Viper  |
 | 日志 | Zap + lumberjack |
 | ORM | GORM |
 | 数据库 | MySQL 8.0 |
