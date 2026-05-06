@@ -11,12 +11,16 @@ import (
 	"github.com/jiujuan/go-jobs/internal/model"
 )
 
-// Router selects one executor address from a list according to a strategy.
+// ─── Router 接口 ──────────────────────────────────────────────────────────────
+
+// Router 根据路由策略从候选地址列表中选择一个执行器地址。
+// addresses 由 Scheduler.handleTask 通过 executorstore 获取，
+// 已按路由类型区分在线地址（ListOnlineAddresses）或健康地址（ListHealthyAddresses）。
 type Router interface {
 	Route(addresses []string, jobID int64, param string) (string, error)
 }
 
-// NewRouter returns the Router implementation for the given strategy.
+// NewRouter 返回对应路由策略的 Router 实现。
 func NewRouter(strategy model.RouteStrategy) Router {
 	switch strategy {
 	case model.RouteFirst:
@@ -29,6 +33,10 @@ func NewRouter(strategy model.RouteStrategy) Router {
 		return &randomRouter{}
 	case model.RouteConsistentHash:
 		return &consistentHashRouter{}
+	case model.RouteFailover:
+		// Failover 路由直接使用传入的健康地址列表（已由 executorstore 异步预探）
+		// 不再发起同步 Beat，退化为 First 策略选第一个健康节点
+		return &failoverRouter{}
 	case model.RouteLFU:
 		return globalLFU
 	case model.RouteLRU:
@@ -64,7 +72,7 @@ func (r *lastRouter) Route(addresses []string, _ int64, _ string) (string, error
 
 type roundRobinRouter struct {
 	mu      sync.Mutex
-	counter map[string]int64 // key = sorted address list hash
+	counter map[string]int64 // key = address list hash
 }
 
 var globalRoundRobin = &roundRobinRouter{counter: make(map[string]int64)}
@@ -161,6 +169,34 @@ func (r *lruRouter) Route(addresses []string, _ int64, _ string) (string, error)
 	}
 	r.lastUsed[oldest] = time.Now()
 	return oldest, nil
+}
+
+// ─── Failover ─────────────────────────────────────────────────────────────────
+
+// failoverRouter 使用 executorstore 的异步预探健康结果。
+//
+// # 原架构（已废弃）
+//
+//	触发时同步发送 Beat → 最坏情况 N × 3s 阻塞 → 任务堆积
+//
+// # 新架构
+//
+//	executorstore.HealthProber 后台每 10s 探测一次，结果存入 Entry.healthy（原子位）。
+//	路由时调用方（handleTask）已传入 ListHealthyAddresses() 的结果，
+//	failoverRouter 只需从中选第一个即可，延迟降为 O(1) 内存读。
+//
+// # 降级策略
+//
+//	若健康地址列表为空（全部探测失败），handleTask 检测到 len==0，
+//	记录失败日志，等待下次 reschedule。
+type failoverRouter struct{}
+
+// Route 从健康地址列表中选第一个（由 handleTask 传入已经过健康过滤的 addresses）。
+func (r *failoverRouter) Route(addresses []string, _ int64, _ string) (string, error) {
+	if len(addresses) == 0 {
+		return "", fmt.Errorf("failover: no healthy executor available")
+	}
+	return addresses[0], nil
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
