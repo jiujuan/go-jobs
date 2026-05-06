@@ -100,12 +100,61 @@ type SchedulerConfig struct {
 	InternalToken string `mapstructure:"internal_token"`
 }
 
+// ExecutorConfig holds executor-side configuration.
 type ExecutorConfig struct {
 	AppName  string        `mapstructure:"app_name"`
 	Address  string        `mapstructure:"address"` // ip:port this executor listens on
 	Port     int           `mapstructure:"port"`
 	AdminURL string        `mapstructure:"admin_url"` // scheduler admin base URL
 	Timeout  time.Duration `mapstructure:"timeout"`
+
+	// ScriptEngines 是配置驱动的脚本引擎列表。
+	// 每项对应一种 execute_type（如 GO / JAVA / CSHARP / RUBY 等）。
+	// 内置引擎（SHELL / PYTHON / CMD）无需配置，始终可用。
+	// 在此列表中配置新语言后，无需修改任何代码即可在调度平台使用该执行类型。
+	//
+	// YAML 示例（executor.yaml）：
+	//   script_engines:
+	//     - type: go
+	//       binary: go
+	//       args: ["run"]
+	//       exec_mode: file
+	//       file_ext: .go
+	//       work_dir: /tmp/go-jobs-scripts
+	//     - type: java
+	//       binary: java
+	//       args: ["-jar"]
+	//       exec_mode: jar
+	//     - type: csharp
+	//       binary: dotnet
+	//       args: ["script"]
+	//       exec_mode: file
+	//       file_ext: .csx
+	ScriptEngines []ScriptEngineConfig `mapstructure:"script_engines"`
+}
+
+// ScriptEngineConfig 对应 executor.script_engines[] 数组中的单项配置。
+// 与 internal/executor.EngineConfig 字段一一对应；
+// 定义在 pkg/conf 以便与配置加载解耦，避免循环依赖。
+type ScriptEngineConfig struct {
+	// Type 引擎类型名称（大写），即 execute_type 的值，如 "GO" "JAVA" "CSHARP"
+	Type string `mapstructure:"type"`
+	// Binary 可执行程序名称或绝对路径，如 go / java / dotnet / /usr/bin/ruby
+	Binary string `mapstructure:"binary"`
+	// Args binary 与 execute_param 之间的固定参数
+	Args []string `mapstructure:"args"`
+	// FileExt 临时文件扩展名（exec_mode=file 时使用），如 ".go" ".cs"
+	FileExt string `mapstructure:"file_ext"`
+	// WorkDir 临时文件工作目录（空字符串使用系统默认临时目录）
+	WorkDir string `mapstructure:"work_dir"`
+	// Env 追加到子进程的额外环境变量，格式 ["KEY=VALUE", ...]
+	Env []string `mapstructure:"env"`
+	// ExecMode 执行模式：inline（默认）/ file / jar
+	ExecMode string `mapstructure:"exec_mode"`
+	// MaxOutputBytes 单次执行最大输出字节数（0=不限制，建议生产设为 4194304=4MB）
+	MaxOutputBytes int64 `mapstructure:"max_output_bytes"`
+	// Disabled 设为 true 时跳过注册（可用于灰度/临时禁用）
+	Disabled bool `mapstructure:"disabled"`
 }
 
 type JWTConfig struct {
