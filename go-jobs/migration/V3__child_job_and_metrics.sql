@@ -24,3 +24,8 @@ ALTER TABLE `job_info`
 ALTER TABLE `sys_executor`
   ADD COLUMN `cpu`    float DEFAULT '0' COMMENT 'CPU使用率' AFTER `weight`,
   ADD COLUMN `memory` float DEFAULT '0' COMMENT '内存使用率' AFTER `cpu`;
+
+-- 执行器补充字段（如尚未存在）
+ALTER TABLE `sys_executor`
+  ADD COLUMN IF NOT EXISTS `cpu`    float DEFAULT '0' COMMENT 'CPU使用率(%)' AFTER `weight`,
+  ADD COLUMN IF NOT EXISTS `memory` float DEFAULT '0' COMMENT '内存使用率(%)' AFTER `cpu`;
