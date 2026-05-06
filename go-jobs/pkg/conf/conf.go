@@ -13,6 +13,7 @@ import (
 
 // Config is the root configuration structure.
 type Config struct {
+	Alarm    AlarmConfig    `mapstructure:"alarm"`
 	App      AppConfig      `mapstructure:"app"`
 	Server   ServerConfig   `mapstructure:"server"`
 	MySQL    MySQLConfig    `mapstructure:"mysql"`
@@ -209,4 +210,21 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("executor.timeout", "60s")
 
 	v.SetDefault("jwt.expire_duration", "24h")
+}
+
+// AlarmConfig holds alarm channel configuration for v2.
+type AlarmConfig struct {
+	DingtalkWebhook string      `mapstructure:"dingtalk_webhook"`
+	WeComWebhook    string      `mapstructure:"wecom_webhook"`
+	WebhookURL      string      `mapstructure:"webhook_url"`
+	Email           EmailConfig `mapstructure:"email"`
+}
+
+type EmailConfig struct {
+	Host     string   `mapstructure:"host"`
+	Port     int      `mapstructure:"port"`
+	Username string   `mapstructure:"username"`
+	Password string   `mapstructure:"password"`
+	From     string   `mapstructure:"from"`
+	To       []string `mapstructure:"to"`
 }

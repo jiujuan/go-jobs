@@ -6,7 +6,7 @@
 app:
   name: go-jobs
   env: dev
-  version: "1.0.0"
+  version: "2.0.0"
 
 server:
   host: "0.0.0.0"
@@ -66,3 +66,16 @@ scheduler:
 jwt:
   secret: "go-jobs-jwt-secret-change-in-prod"
   expire_duration: 24h
+
+# ── v2.0 新增：告警配置 ──────────────────────────────────────────────────────
+alarm:
+  dingtalk_webhook: ""       # 钉钉机器人 Webhook URL
+  wecom_webhook:    ""       # 企业微信机器人 Webhook URL
+  webhook_url:      ""       # 通用 Webhook URL
+  email:
+    host:     ""             # SMTP 主机，如 smtp.qq.com
+    port:     465
+    username: ""
+    password: ""
+    from:     ""
+    to:       []
