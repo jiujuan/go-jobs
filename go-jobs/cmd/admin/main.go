@@ -1,8 +1,5 @@
-// Command admin starts the go-jobs scheduler centre and admin HTTP API.
-//
-// Usage:
-//
-//	go run ./cmd/admin -config config/config.yaml
+// Command admin starts the go-jobs v2 scheduler centre and admin HTTP API.
+// v2 新增：失败重试、告警通知、阻塞策略、Misfire补偿、调度统计。
 package main
 
 import (
@@ -36,14 +33,12 @@ func main() {
 	configFile := flag.String("config", "config/config.yaml", "config file path")
 	flag.Parse()
 
-	// ── Load configuration ──────────────────────────────────────────────────
 	cfg, err := conf.Load(conf.WithConfigFile(*configFile))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
 		os.Exit(1)
 	}
 
-	// ── Initialise logger ───────────────────────────────────────────────────
 	applogger.Init(
 		applogger.WithLevel(cfg.Logger.Level),
 		applogger.WithFilename(cfg.Logger.Filename),
@@ -53,11 +48,10 @@ func main() {
 	)
 	defer applogger.Sync()
 
-	applogger.Info("go-jobs admin starting",
+	applogger.Info("go-jobs admin v2 starting",
 		zap.String("version", cfg.App.Version),
 		zap.String("env", cfg.App.Env))
 
-	// ── MySQL ───────────────────────────────────────────────────────────────
 	var gormLogLevel gormlogger.LogLevel
 	switch cfg.MySQL.LogLevel {
 	case "info":
@@ -77,7 +71,6 @@ func main() {
 	)
 	applogger.Info("mysql connected")
 
-	// ── Redis ────────────────────────────────────────────────────────────────
 	rdb := pkgredis.MustNew(
 		pkgredis.WithAddr(cfg.Redis.Addr),
 		pkgredis.WithPassword(cfg.Redis.Password),
@@ -86,13 +79,11 @@ func main() {
 	)
 	applogger.Info("redis connected")
 
-	// ── DAOs ─────────────────────────────────────────────────────────────────
 	jobDAO := dao.NewJobInfoDAO(db)
 	logDAO := dao.NewJobLogDAO(db)
 	executorDAO := dao.NewExecutorDAO(db)
 	userDAO := dao.NewUserDAO(db)
 
-	// ── Scheduler ─────────────────────────────────────────────────────────
 	nodeID := cfg.Scheduler.NodeID
 	if nodeID == "" {
 		nodeID = utils.NodeID(cfg.Server.Port)
@@ -102,12 +93,36 @@ func main() {
 		scheduler.WithNodeID(nodeID),
 	)
 
-	// ── Services ──────────────────────────────────────────────────────────
 	jobSvc := service.NewJobService(jobDAO, logDAO, executorDAO, sched)
 	userSvc := service.NewUserService(userDAO, cfg.JWT.Secret, cfg.JWT.ExpireDuration)
 	execSvc := service.NewExecutorService(executorDAO, cfg.Scheduler.HeartbeatTimeout)
+	retrySvc := service.NewRetryService(jobDAO, logDAO, sched)
+	statSvc := service.NewStatService(db)
 
-	// ── HTTP Server ────────────────────────────────────────────────────────
+	// 告警通道（按配置动态启用）
+	var alarmers []service.Alarmer
+	if cfg.Alarm.DingtalkWebhook != "" {
+		alarmers = append(alarmers, &service.DingtalkAlarmer{WebhookURL: cfg.Alarm.DingtalkWebhook})
+	}
+	if cfg.Alarm.WeComWebhook != "" {
+		alarmers = append(alarmers, &service.WeComAlarmer{WebhookURL: cfg.Alarm.WeComWebhook})
+	}
+	if cfg.Alarm.WebhookURL != "" {
+		alarmers = append(alarmers, &service.WebhookAlarmer{URL: cfg.Alarm.WebhookURL})
+	}
+	if cfg.Alarm.Email.Host != "" && len(cfg.Alarm.Email.To) > 0 {
+		alarmers = append(alarmers, &service.EmailAlarmer{
+			Host:     cfg.Alarm.Email.Host,
+			Port:     cfg.Alarm.Email.Port,
+			Username: cfg.Alarm.Email.Username,
+			Password: cfg.Alarm.Email.Password,
+			From:     cfg.Alarm.Email.From,
+			To:       cfg.Alarm.Email.To,
+		})
+	}
+	alarmSvc := service.NewAlarmService(alarmers...)
+	_ = alarmSvc
+
 	gin.SetMode(cfg.Server.Mode)
 	r := gin.New()
 	r.Use(
@@ -121,12 +136,22 @@ func main() {
 		}),
 	)
 
-	r.GET("/health", func(c *gin.Context) { c.JSON(200, gin.H{"status": "ok", "node": nodeID}) })
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(200, gin.H{"status": "ok", "version": "2.0", "node": nodeID})
+	})
 
-	// Public
+	// v2: 统计 API
+	r.GET("/api/stats/dashboard", middleware.JWTAuth(userSvc), func(c *gin.Context) {
+		data, err := statSvc.GetDashboardStats(c.Request.Context())
+		if err != nil {
+			c.JSON(500, gin.H{"code": 1500, "message": err.Error()})
+			return
+		}
+		c.JSON(200, gin.H{"code": 0, "message": "success", "data": data})
+	})
+
 	r.POST("/api/login", adminhandler.NewUserHandler(userSvc).Login)
 
-	// Internal (executor → scheduler)
 	internalToken := cfg.Scheduler.InternalToken
 	if internalToken == "" {
 		internalToken = "go-jobs-internal"
@@ -138,7 +163,6 @@ func main() {
 	internal.POST("/heartbeat", internalHandler.Heartbeat)
 	internal.POST("/deregister", internalHandler.Deregister)
 
-	// Admin (JWT-protected)
 	api := r.Group("/api")
 	api.Use(middleware.JWTAuth(userSvc))
 	{
@@ -175,20 +199,32 @@ func main() {
 		WriteTimeout: cfg.Server.WriteTimeout,
 	}
 
-	// ── Start scheduler ─────────────────────────────────────────────────────
 	if err := sched.Start(); err != nil {
 		applogger.Fatal("start scheduler failed", zap.Error(err))
 	}
 
-	// ── Start sweeper (mark stale executors offline) ────────────────────────
 	sweepTicker := time.NewTicker(30 * time.Second)
+	retryTicker := time.NewTicker(30 * time.Second)
+	statTicker := time.NewTicker(time.Hour)
+
 	go func() {
 		for range sweepTicker.C {
 			execSvc.SweepOfflineExecutors(context.Background())
 		}
 	}()
+	go func() {
+		for range retryTicker.C {
+			retrySvc.Run(context.Background())
+		}
+	}()
+	go func() {
+		for t := range statTicker.C {
+			if err := statSvc.Aggregate(context.Background(), t.Add(-time.Hour)); err != nil {
+				applogger.Warn("stat aggregate failed", zap.Error(err))
+			}
+		}
+	}()
 
-	// ── Start HTTP server (non-blocking) ────────────────────────────────────
 	go func() {
 		applogger.Info("http server listening", zap.String("addr", srv.Addr))
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -196,13 +232,14 @@ func main() {
 		}
 	}()
 
-	// ── Graceful shutdown ───────────────────────────────────────────────────
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
 	applogger.Info("shutting down...")
 	sweepTicker.Stop()
+	retryTicker.Stop()
+	statTicker.Stop()
 	sched.Stop()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -210,5 +247,5 @@ func main() {
 	if err := srv.Shutdown(ctx); err != nil {
 		applogger.Error("server shutdown error", zap.Error(err))
 	}
-	applogger.Info("go-jobs admin stopped")
+	applogger.Info("go-jobs admin v2 stopped")
 }

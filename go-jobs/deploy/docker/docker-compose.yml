@@ -22,6 +22,7 @@ services:
       - mysql_data:/var/lib/mysql
       - ./migration/V1__init_schema.sql:/docker-entrypoint-initdb.d/01_init.sql
       - ./migration/V2__alarm_and_stats.sql:/docker-entrypoint-initdb.d/02_alarm.sql
+      - ./migration/V3__child_job_and_metrics.sql:/docker-entrypoint-initdb.d/03_v3.sql
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-ppassword"]
       interval: 10s
