@@ -121,9 +121,9 @@ go-jobs/
 │   ├── scheduler/             # 调度核心引擎
 │   └── executor/              # 执行器逻辑
 ├── pkg/
-│   ├── conf/conf.go           # Viper 配置（functional options）
-│   ├── logger/logger.go       # Zap 日志（functional options）
-│   ├── mysql/mysql.go         # GORM 连接（functional options）
+│   ├── conf/conf.go           # Viper 配置
+│   ├── logger/logger.go       # Zap 日志
+│   ├── mysql/mysql.go         # GORM 连接
 │   ├── redis/redis.go         # Redis 客户端 + 分布式锁
 │   ├── utils/utils.go         # 通用工具
 │   └── xerror/xerror.go       # 统一错误码
