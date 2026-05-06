@@ -178,6 +178,11 @@ func (s *Scheduler) schedule() {
 
 func (s *Scheduler) dispatchJob(ctx context.Context, job *model.JobInfo) {
 	// Compute the scheduled fire time: it might be in the near future.
+	// Handle misfire before dispatching.
+	if s.handleMisfire(ctx, job) {
+		return
+	}
+
 	fireTime := time.Now()
 	if job.NextTriggerTime != nil && job.NextTriggerTime.After(fireTime) {
 		// Sleep until fire time (short duration within preload window).
@@ -263,6 +268,11 @@ func (s *Scheduler) handleTask(task *triggerTask) {
 		return
 	}
 	defer func() { _ = s.redis.ReleaseLock(ctx, lockKey, lockVal) }()
+
+	// Apply block strategy before dispatching.
+	if !s.applyBlockStrategy(ctx, job) {
+		return
+	}
 
 	// Select executor(s) for the job.
 	executors, err := s.executorDAO.ListByApp(ctx, job.ExecutorApp)
