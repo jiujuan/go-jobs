@@ -1,5 +1,5 @@
-// Command admin starts the go-jobs v2 scheduler centre and admin HTTP API.
-// v2 新增：失败重试、告警通知、阻塞策略、Misfire补偿、调度统计。
+// Command admin starts the go-jobs v3 scheduler centre.
+// v3 新增：Etcd选主、ES日志、子任务依赖、任务分组、FAILOVER路由、资源上报、调度统计。
 package main
 
 import (
@@ -22,7 +22,13 @@ import (
 	"github.com/jiujuan/go-jobs/internal/dao"
 	"github.com/jiujuan/go-jobs/internal/scheduler"
 	"github.com/jiujuan/go-jobs/internal/service"
+	"github.com/jiujuan/go-jobs/pkg/executorstore"
+	"github.com/jiujuan/go-jobs/pkg/jobtpl"
+	"github.com/jiujuan/go-jobs/pkg/paramtpl"
+	"github.com/jiujuan/go-jobs/pkg/ratelimit"
 	"github.com/jiujuan/go-jobs/pkg/conf"
+	espkg "github.com/jiujuan/go-jobs/pkg/es"
+	etcdpkg "github.com/jiujuan/go-jobs/pkg/etcd"
 	applogger "github.com/jiujuan/go-jobs/pkg/logger"
 	pkgmysql "github.com/jiujuan/go-jobs/pkg/mysql"
 	pkgredis "github.com/jiujuan/go-jobs/pkg/redis"
@@ -48,10 +54,11 @@ func main() {
 	)
 	defer applogger.Sync()
 
-	applogger.Info("go-jobs admin v2 starting",
+	applogger.Info("go-jobs admin v3 starting",
 		zap.String("version", cfg.App.Version),
 		zap.String("env", cfg.App.Env))
 
+	// ── MySQL ────────────────────────────────────────────────────────────────
 	var gormLogLevel gormlogger.LogLevel
 	switch cfg.MySQL.LogLevel {
 	case "info":
@@ -71,6 +78,7 @@ func main() {
 	)
 	applogger.Info("mysql connected")
 
+	// ── Redis ────────────────────────────────────────────────────────────────
 	rdb := pkgredis.MustNew(
 		pkgredis.WithAddr(cfg.Redis.Addr),
 		pkgredis.WithPassword(cfg.Redis.Password),
@@ -79,27 +87,88 @@ func main() {
 	)
 	applogger.Info("redis connected")
 
+	// ── ElasticSearch (optional) ─────────────────────────────────────────────
+	var esClient *espkg.Client
+	if cfg.ES.Enabled && len(cfg.ES.Addresses) > 0 {
+		esClient, err = espkg.New(
+			espkg.WithAddresses(cfg.ES.Addresses),
+			espkg.WithCredentials(cfg.ES.Username, cfg.ES.Password),
+			espkg.WithIndex(cfg.ES.Index),
+		)
+		if err != nil {
+			applogger.Warn("es init failed (disabled)", zap.Error(err))
+		} else {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if err := esClient.EnsureIndex(ctx); err != nil {
+				applogger.Warn("es ensure index failed", zap.Error(err))
+			}
+			cancel()
+			applogger.Info("elasticsearch connected", zap.String("index", cfg.ES.Index))
+		}
+	}
+	esLogSvc := service.NewESLogService(esClient, cfg.ES.Enabled && esClient != nil)
+
+	// ── Etcd (optional, for leader election) ────────────────────────────────
+	var etcdClient interface{ Close() error }
+
+	// ── DAOs ──────────────────────────────────────────────────────────────────
 	jobDAO := dao.NewJobInfoDAO(db)
 	logDAO := dao.NewJobLogDAO(db)
 	executorDAO := dao.NewExecutorDAO(db)
 	userDAO := dao.NewUserDAO(db)
 
+	// ── Scheduler ─────────────────────────────────────────────────────────────
 	nodeID := cfg.Scheduler.NodeID
 	if nodeID == "" {
 		nodeID = utils.NodeID(cfg.Server.Port)
 	}
-	sched := scheduler.New(jobDAO, logDAO, executorDAO, rdb,
-		scheduler.WithPreloadWindow(cfg.Scheduler.PreloadDuration),
-		scheduler.WithNodeID(nodeID),
+	// ── ExecutorStore（内存注册表 + 异步健康探测）──────────────────────────
+	execStore := executorstore.New(
+		func(addr string) executorstore.BeatClient { return scheduler.NewExecutorClient(addr) },
+		executorstore.ZapLoggerAdapter(applogger.Logger()),
+		executorstore.WithProbeInterval(10*time.Second),
+		executorstore.WithProbeTimeout(2*time.Second),
+		executorstore.WithHeartbeatTTL(cfg.Scheduler.HeartbeatTimeout),
+	)
+	execStore.Start(context.Background())
+
+	// ── 限流注册表（任务限流与配额）──────────────────────────────────────
+	// 可通过 rateLimiterReg.RegisterApp / RegisterJob 动态配置限流规则。
+	rateLimiterReg := ratelimit.NewRegistry()
+	// 示例：为关键 App 配置默认限流（生产环境建议从配置文件读取）
+	// rateLimiterReg.RegisterApp("critical-app", ratelimit.LimiterConfig{
+	//     Rate: 10, Burst: 20,
+	//     QuotaWindow: 24*time.Hour, QuotaLimit: 10000,
+	// })
+
+	// ── 参数模板引擎（任务参数模板化）──────────────────────────────────────
+	paramEngine := paramtpl.New(
+		paramtpl.WithEnv(cfg.App.Env),
+		paramtpl.WithNodeID(nodeID),
+		paramtpl.WithCacheSize(1024),
 	)
 
+	// ── 任务模板注册表（任务模板化）──────────────────────────────────────
+	tplRegistry := jobtpl.NewRegistry()
+
+	sched := scheduler.New(jobDAO, logDAO, executorDAO, rdb, execStore,
+		scheduler.WithPreloadWindow(cfg.Scheduler.PreloadDuration),
+		scheduler.WithNodeID(nodeID),
+		scheduler.WithRateLimiter(rateLimiterReg),
+		scheduler.WithParamEngine(paramEngine),
+	)
+
+	// ── Services ───────────────────────────────────────────────────────────────
 	jobSvc := service.NewJobService(jobDAO, logDAO, executorDAO, sched)
+	tplSvc := service.NewJobTemplateService(tplRegistry, jobSvc)
 	userSvc := service.NewUserService(userDAO, cfg.JWT.Secret, cfg.JWT.ExpireDuration)
-	execSvc := service.NewExecutorService(executorDAO, cfg.Scheduler.HeartbeatTimeout)
+	execSvc := service.NewExecutorService(executorDAO, cfg.Scheduler.HeartbeatTimeout, execStore)
 	retrySvc := service.NewRetryService(jobDAO, logDAO, sched)
 	statSvc := service.NewStatService(db)
+	groupSvc := service.NewJobGroupService(db)
+	_ = esLogSvc
 
-	// 告警通道（按配置动态启用）
+	// 告警通道
 	var alarmers []service.Alarmer
 	if cfg.Alarm.DingtalkWebhook != "" {
 		alarmers = append(alarmers, &service.DingtalkAlarmer{WebhookURL: cfg.Alarm.DingtalkWebhook})
@@ -110,19 +179,10 @@ func main() {
 	if cfg.Alarm.WebhookURL != "" {
 		alarmers = append(alarmers, &service.WebhookAlarmer{URL: cfg.Alarm.WebhookURL})
 	}
-	if cfg.Alarm.Email.Host != "" && len(cfg.Alarm.Email.To) > 0 {
-		alarmers = append(alarmers, &service.EmailAlarmer{
-			Host:     cfg.Alarm.Email.Host,
-			Port:     cfg.Alarm.Email.Port,
-			Username: cfg.Alarm.Email.Username,
-			Password: cfg.Alarm.Email.Password,
-			From:     cfg.Alarm.Email.From,
-			To:       cfg.Alarm.Email.To,
-		})
-	}
 	alarmSvc := service.NewAlarmService(alarmers...)
 	_ = alarmSvc
 
+	// ── HTTP Server ────────────────────────────────────────────────────────────
 	gin.SetMode(cfg.Server.Mode)
 	r := gin.New()
 	r.Use(
@@ -137,10 +197,15 @@ func main() {
 	)
 
 	r.GET("/health", func(c *gin.Context) {
-		c.JSON(200, gin.H{"status": "ok", "version": "2.0", "node": nodeID})
+		c.JSON(200, gin.H{
+			"status":    "ok",
+			"version":   "3.0",
+			"node":      nodeID,
+			"es_enabled": esLogSvc.Enabled(),
+		})
 	})
 
-	// v2: 统计 API
+	// 统计 API
 	r.GET("/api/stats/dashboard", middleware.JWTAuth(userSvc), func(c *gin.Context) {
 		data, err := statSvc.GetDashboardStats(c.Request.Context())
 		if err != nil {
@@ -148,6 +213,66 @@ func main() {
 			return
 		}
 		c.JSON(200, gin.H{"code": 0, "message": "success", "data": data})
+	})
+
+	// v3: ES 日志搜索 API
+	r.GET("/api/logs/search", middleware.JWTAuth(userSvc), func(c *gin.Context) {
+		if !esLogSvc.Enabled() {
+			c.JSON(400, gin.H{"code": 1001, "message": "ES is not enabled"})
+			return
+		}
+		req := &espkg.SearchLogsRequest{
+			Keyword:  c.Query("keyword"),
+			Page:     queryInt(c, "page", 1),
+			PageSize: queryInt(c, "page_size", 20),
+		}
+		if jid := c.Query("job_id"); jid != "" {
+			fmt.Sscanf(jid, "%d", &req.JobID)
+		}
+		docs, total, err := esLogSvc.SearchLogs(c.Request.Context(), req)
+		if err != nil {
+			c.JSON(500, gin.H{"code": 1500, "message": err.Error()})
+			return
+		}
+		c.JSON(200, gin.H{"code": 0, "data": gin.H{
+			"list": docs, "total": total,
+			"page": req.Page, "page_size": req.PageSize,
+		}})
+	})
+
+	// v3: 任务分组 API
+	r.GET("/api/groups", middleware.JWTAuth(userSvc), func(c *gin.Context) {
+		groups, err := groupSvc.ListGroups(c.Request.Context())
+		if err != nil {
+			c.JSON(500, gin.H{"code": 1500, "message": err.Error()})
+			return
+		}
+		c.JSON(200, gin.H{"code": 0, "data": groups})
+	})
+	r.POST("/api/groups", middleware.JWTAuth(userSvc), func(c *gin.Context) {
+		var body struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(400, gin.H{"code": 1001, "message": err.Error()})
+			return
+		}
+		g, err := groupSvc.CreateGroup(c.Request.Context(), body.Name, body.Description)
+		if err != nil {
+			c.JSON(500, gin.H{"code": 1500, "message": err.Error()})
+			return
+		}
+		c.JSON(200, gin.H{"code": 0, "data": g})
+	})
+	r.DELETE("/api/groups/:id", middleware.JWTAuth(userSvc), func(c *gin.Context) {
+		var id int64
+		fmt.Sscanf(c.Param("id"), "%d", &id)
+		if err := groupSvc.DeleteGroup(c.Request.Context(), id); err != nil {
+			c.JSON(500, gin.H{"code": 1500, "message": err.Error()})
+			return
+		}
+		c.JSON(200, gin.H{"code": 0})
 	})
 
 	r.POST("/api/login", adminhandler.NewUserHandler(userSvc).Login)
@@ -172,6 +297,18 @@ func main() {
 		jobH := adminhandler.NewJobHandler(jobSvc)
 		logH := adminhandler.NewLogHandler(jobSvc)
 		execH := adminhandler.NewExecutorHandler(execSvc)
+
+		// ── 任务模板 API ─────────────────────────────────────────────────
+		tplH := adminhandler.NewJobTemplateHandler(tplSvc)
+		templates := api.Group("/job-templates")
+		templates.POST("", tplH.CreateTemplate)
+		templates.GET("", tplH.ListTemplates)
+		templates.GET("/id/:id", tplH.GetTemplateByID)
+		templates.GET("/:name", tplH.GetTemplate)
+		templates.PUT("/:name", tplH.UpdateTemplate)
+		templates.DELETE("/:name", tplH.DeleteTemplate)
+		templates.POST("/:name/instantiate", tplH.InstantiateTemplate)
+		templates.POST("/:name/batch-instantiate", tplH.BatchInstantiateTemplate)
 
 		jobs := api.Group("/jobs")
 		jobs.POST("", jobH.CreateJob)
@@ -199,10 +336,53 @@ func main() {
 		WriteTimeout: cfg.Server.WriteTimeout,
 	}
 
-	if err := sched.Start(); err != nil {
-		applogger.Fatal("start scheduler failed", zap.Error(err))
+	// ── Etcd Leader Election ─────────────────────────────────────────────────
+	var leaderElection *etcdpkg.LeaderElection
+	if len(cfg.Etcd.Endpoints) > 0 && cfg.Etcd.Endpoints[0] != "" {
+		etcdCli, err := etcdpkg.NewClient(
+			etcdpkg.WithEndpoints(cfg.Etcd.Endpoints),
+			etcdpkg.WithDialTimeout(cfg.Etcd.DialTimeout),
+		)
+		if err != nil {
+			applogger.Warn("etcd connect failed, running as standalone", zap.Error(err))
+		} else {
+			etcdClient = etcdCli
+			leaderElection, err = etcdpkg.NewLeaderElection(
+				etcdCli,
+				"/go-jobs/scheduler/leader",
+				nodeID,
+				func() {
+					applogger.Info("etcd: became leader, starting scheduler")
+					if startErr := sched.Start(); startErr != nil {
+						applogger.Error("scheduler start (after election) failed", zap.Error(startErr))
+					}
+				},
+				func() {
+					applogger.Warn("etcd: lost leadership, stopping scheduler")
+					sched.Stop()
+				},
+			)
+			if err != nil {
+				applogger.Warn("leader election init failed", zap.Error(err))
+				leaderElection = nil
+			} else {
+				applogger.Info("etcd connected, starting leader election",
+					zap.Strings("endpoints", cfg.Etcd.Endpoints))
+				go leaderElection.Run(context.Background())
+			}
+		}
+	}
+	_ = etcdClient
+
+	// 无 Etcd 时直接启动
+	if leaderElection == nil {
+		if err := sched.Start(); err != nil {
+			applogger.Fatal("start scheduler failed", zap.Error(err))
+		}
+		applogger.Info("scheduler started (standalone mode)")
 	}
 
+	// ── Background tickers ────────────────────────────────────────────────────
 	sweepTicker := time.NewTicker(30 * time.Second)
 	retryTicker := time.NewTicker(30 * time.Second)
 	statTicker := time.NewTicker(time.Hour)
@@ -232,6 +412,7 @@ func main() {
 		}
 	}()
 
+	// ── Graceful shutdown ─────────────────────────────────────────────────────
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
@@ -240,12 +421,29 @@ func main() {
 	sweepTicker.Stop()
 	retryTicker.Stop()
 	statTicker.Stop()
-	sched.Stop()
+
+	if leaderElection != nil {
+		leaderElection.Stop()
+	} else {
+		sched.Stop()
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		applogger.Error("server shutdown error", zap.Error(err))
 	}
-	applogger.Info("go-jobs admin v2 stopped")
+	applogger.Info("go-jobs admin v3 stopped")
+}
+
+func queryInt(c *gin.Context, key string, defaultVal int) int {
+	s := c.Query(key)
+	if s == "" {
+		return defaultVal
+	}
+	var n int
+	if _, err := fmt.Sscanf(s, "%d", &n); err != nil {
+		return defaultVal
+	}
+	return n
 }
