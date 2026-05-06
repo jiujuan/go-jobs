@@ -87,7 +87,10 @@ type JobInfo struct {
 	Status          JobStatus       `gorm:"not null;default:1"                    json:"status"`
 	NextTriggerTime *time.Time      `gorm:"column:next_trigger_time"              json:"next_trigger_time"`
 	LastTriggerTime *time.Time      `gorm:"column:last_trigger_time"              json:"last_trigger_time"`
-	CreateUser      string          `gorm:"size:32;default:'admin'"               json:"create_user"`
+	ChildJobIDs     string          `gorm:"size:255;default:''"`                   json:"child_job_ids"`
+	GroupID         int64           `gorm:"default:0"`                            json:"group_id"`
+	TriggerCount    int64           `gorm:"default:0"`                            json:"trigger_count"`
+	CreateUser      string          `gorm:"size:32;default:'admin'"`                json:"create_user"`
 	CreateTime      time.Time       `gorm:"autoCreateTime"                        json:"create_time"`
 	UpdateTime      time.Time       `gorm:"autoUpdateTime"                        json:"update_time"`
 }
@@ -96,3 +99,13 @@ func (JobInfo) TableName() string { return "job_info" }
 
 // IsRunning returns true if the job is enabled.
 func (j *JobInfo) IsRunning() bool { return j.Status == JobRun }
+
+// JobGroup 对应 job_group 任务分组表（v3 新增）。
+type JobGroup struct {
+	ID          int64     `gorm:"primaryKey;autoIncrement" json:"id"`
+	Name        string    `gorm:"size:64;not null;uniqueIndex" json:"name"`
+	Description string    `gorm:"size:255;default:''"          json:"description"`
+	CreateTime  time.Time `gorm:"autoCreateTime"               json:"create_time"`
+}
+
+func (JobGroup) TableName() string { return "job_group" }
