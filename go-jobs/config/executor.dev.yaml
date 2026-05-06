@@ -6,7 +6,7 @@
 app:
   name: go-jobs-executor
   env: dev
-  version: "1.0.0"
+  version: "3.5.0"
 
 server:
   mode: debug
@@ -26,3 +26,100 @@ executor:
   port: 9901
   admin_url: "http://127.0.0.1:8080"  # scheduler admin base URL
   timeout: 60s
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 脚本引擎扩展配置（Script Engine Registry）
+  #
+  # 内置引擎（SHELL / PYTHON / CMD）无需在此配置，始终可用。
+  # 在此列表中新增配置项后，无需改动任何代码，
+  # 只需在调度平台将任务的 execute_type 设为对应 type 值即可使用。
+  #
+  # exec_mode 说明：
+  #   inline : execute_param 作为代码内容传给解释器（binary args... -c "param"）
+  #            适合：groovy / ruby / node 等支持 -e/-c 的解释器
+  #   file   : execute_param 写入临时文件，传文件路径给解释器（binary args... /tmp/xxx.ext）
+  #            适合：go run / dotnet script / 需要文件的解释器
+  #   jar    : execute_param 直接作为最后参数（binary args... param）
+  #            适合：java -jar app.jar / 可执行制品路径
+  # ─────────────────────────────────────────────────────────────────────────
+  script_engines:
+
+    # ── Go ──────────────────────────────────────────────────────────────────
+    # execute_type: GO
+    # execute_param: Go 源码内容（单文件 main 包）
+    - type: go
+      binary: go
+      args: ["run"]
+      exec_mode: file
+      file_ext: ".go"
+      work_dir: "/tmp/go-jobs-scripts/go"
+      max_output_bytes: 4194304   # 4 MB
+      env:
+        - "GOFLAGS=-mod=mod"
+        - "GOPATH=/usr/local/go"
+
+    # ── Java (JAR 制品模式) ──────────────────────────────────────────────────
+    # execute_type: JAVA
+    # execute_param: JAR 文件绝对路径，如 /opt/jobs/my-job.jar
+    - type: java
+      binary: java
+      args: ["-Xmx256m", "-jar"]
+      exec_mode: jar
+      max_output_bytes: 4194304
+      env:
+        - "JAVA_OPTS=-Dfile.encoding=UTF-8"
+
+    # ── C# / .NET Script ────────────────────────────────────────────────────
+    # execute_type: CSHARP
+    # execute_param: C# 脚本源码内容（dotnet-script 语法）
+    # 前置条件：dotnet tool install -g dotnet-script
+    - type: csharp
+      binary: dotnet
+      args: ["script"]
+      exec_mode: file
+      file_ext: ".csx"
+      work_dir: "/tmp/go-jobs-scripts/csharp"
+      max_output_bytes: 4194304
+
+    # ── Node.js ─────────────────────────────────────────────────────────────
+    # execute_type: NODEJS
+    # execute_param: JavaScript 源码内容
+    - type: nodejs
+      binary: node
+      args: ["-e"]
+      exec_mode: inline
+      max_output_bytes: 2097152   # 2 MB
+
+    # ── Ruby ────────────────────────────────────────────────────────────────
+    # execute_type: RUBY
+    # execute_param: Ruby 代码内容
+    - type: ruby
+      binary: ruby
+      args: ["-e"]
+      exec_mode: inline
+      max_output_bytes: 2097152
+
+    # ── Groovy ──────────────────────────────────────────────────────────────
+    # execute_type: GROOVY
+    # execute_param: Groovy 脚本源码内容（写入 .groovy 文件执行）
+    - type: groovy
+      binary: groovy
+      exec_mode: file
+      file_ext: ".groovy"
+      work_dir: "/tmp/go-jobs-scripts/groovy"
+      max_output_bytes: 4194304
+
+    # ── Perl ────────────────────────────────────────────────────────────────
+    # execute_type: PERL
+    # execute_param: Perl 代码内容
+    - type: perl
+      binary: perl
+      args: ["-e"]
+      exec_mode: inline
+      max_output_bytes: 1048576   # 1 MB
+
+    # ── 禁用示例（灰度下线某类任务） ────────────────────────────────────────
+    # execute_type: LEGACY（已被禁用，调度平台报 unsupported execute_type 错误）
+    - type: legacy
+      binary: bash
+      disabled: true
