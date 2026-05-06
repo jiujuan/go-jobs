@@ -31,6 +31,8 @@ type Executor struct {
 	Weight        int            `gorm:"not null;default:1"       json:"weight"`
 	HeartbeatTime *time.Time     `gorm:"column:heartbeat_time"    json:"heartbeat_time"`
 	Version       string         `gorm:"size:32"                  json:"version"`
+	CPU           float64        `gorm:"default:0"                json:"cpu"`
+	Memory        float64        `gorm:"default:0"                json:"memory"`
 	Tags          string         `gorm:"size:255"                 json:"tags"`
 	CreateTime    time.Time      `gorm:"autoCreateTime"           json:"create_time"`
 	UpdateTime    time.Time      `gorm:"autoUpdateTime"           json:"update_time"`
