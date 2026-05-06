@@ -15,6 +15,10 @@ type JobLogDAO interface {
 	FindByID(ctx context.Context, id int64) (*model.JobLog, error)
 	ListByJob(ctx context.Context, jobID int64, page, pageSize int) ([]*model.JobLog, int64, error)
 	ListRunning(ctx context.Context) ([]*model.JobLog, error)
+	// ListRetryable returns recently failed logs eligible for retry.
+	ListRetryable(ctx context.Context, limit int) ([]*model.JobLog, error)
+	// CountRetries returns how many retry logs exist for a job since triggerTime.
+	CountRetries(ctx context.Context, jobID int64, triggerTime time.Time) (int64, error)
 	// CreateDetail stores the detailed log text reported by the executor.
 	CreateDetail(ctx context.Context, d *model.JobLogDetail) error
 	FindDetail(ctx context.Context, logID int64) (*model.JobLogDetail, error)
@@ -84,4 +88,33 @@ func (d *jobLogDAO) FindDetail(ctx context.Context, logID int64) (*model.JobLogD
 	var det model.JobLogDetail
 	err := d.db.WithContext(ctx).Where("log_id = ?", logID).First(&det).Error
 	return &det, err
+}
+
+// ─── v2.0 新增方法 ────────────────────────────────────────────────────────────
+
+// ListRetryable 返回过去 5 分钟内、首次失败、任务配置了重试的日志。
+// 排除 trigger_type=TriggerRetry 的记录（防止重复统计重试日志本身）。
+func (d *jobLogDAO) ListRetryable(ctx context.Context, limit int) ([]*model.JobLog, error) {
+	var list []*model.JobLog
+	cutoff := time.Now().Add(-5 * time.Minute)
+	err := d.db.WithContext(ctx).
+		Joins("JOIN job_info ON job_info.id = job_log.job_id").
+		Where(
+			"job_log.status = ? AND job_log.trigger_type != ? AND job_info.retry_count > 0 AND job_log.trigger_time > ?",
+			model.LogFail, model.TriggerRetry, cutoff,
+		).
+		Order("job_log.id DESC").
+		Limit(limit).
+		Find(&list).Error
+	return list, err
+}
+
+// CountRetries 统计某任务从 triggerTime 起已产生的重试次数。
+func (d *jobLogDAO) CountRetries(ctx context.Context, jobID int64, triggerTime time.Time) (int64, error) {
+	var count int64
+	err := d.db.WithContext(ctx).Model(&model.JobLog{}).
+		Where("job_id = ? AND trigger_type = ? AND trigger_time >= ?",
+			jobID, model.TriggerRetry, triggerTime).
+		Count(&count).Error
+	return count, err
 }
