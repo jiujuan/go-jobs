@@ -13,11 +13,12 @@ import (
 	"github.com/jiujuan/go-jobs/pkg/logger"
 )
 
-// misfireThreshold 超过此阈值认为发生了 misfire（调度延迟）。
+// misfireThreshold: 超过此阈值认为发生了 misfire（任务错过正常调度窗口）。
 const misfireThreshold = 5 * time.Second
 
 // handleMisfire 检查任务是否错过了调度窗口，并按策略处理。
-// 调用时机：任务在 schedule() 中被取出时，判断是否已超出正常延迟。
+// 返回 true 表示已由 misfire 逻辑处理（调用者跳过正常调度）。
+// 在时间轮架构下，misfire 仅可能发生在进程重启后的首次 bootstrap 扫描中。
 func (s *Scheduler) handleMisfire(ctx context.Context, job *model.JobInfo) bool {
 	if job.NextTriggerTime == nil {
 		return false
@@ -36,16 +37,28 @@ func (s *Scheduler) handleMisfire(ctx context.Context, job *model.JobInfo) bool 
 
 	switch job.MisfireStrategy {
 	case model.MisfireIgnore:
-		// 忽略：只更新下次触发时间，不补偿执行。
-		logger.Info("scheduler: misfire ignored", zap.Int64("jobID", job.ID))
-		_ = s.advanceNextTrigger(ctx, job)
-		return true // 告知调用者已处理，跳过正常调度
+		// 忽略：只推进下次触发时间，不补偿执行。
+		logger.Info("scheduler: misfire ignored, advancing next trigger",
+			zap.Int64("jobID", job.ID))
+		s.reschedule(ctx, job)
+		return true
 
 	case model.MisfireRunOnce:
-		// 立即执行一次：先触发一次补偿，再更新下次触发时间。
-		logger.Info("scheduler: misfire run-once compensation", zap.Int64("jobID", job.ID))
-		s.enqueue(job, time.Now(), model.TriggerCron)
-		_ = s.advanceNextTrigger(ctx, job)
+		// 立即执行一次补偿，然后重新计算下次触发时间。
+		logger.Info("scheduler: misfire run-once compensation",
+			zap.Int64("jobID", job.ID))
+		// 直接入 workerCh，非阻塞投递
+		select {
+		case s.workerCh <- &triggerTask{
+			job:         job,
+			triggerTime: time.Now(),
+			triggerType: model.TriggerCron,
+		}:
+		default:
+			logger.Warn("scheduler: worker channel full during misfire compensation",
+				zap.Int64("jobID", job.ID))
+		}
+		s.reschedule(ctx, job)
 		return true
 
 	default:
