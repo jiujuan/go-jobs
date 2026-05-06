@@ -39,6 +39,15 @@ const (
 	CodeLockFail    Code = 4001
 	CodeLockTimeout Code = 4002
 
+	// CodeDuplicateExecution 表示相同 LogID 的任务正在执行中，本次为重复请求。
+	// HTTP 层应返回 409 Conflict。
+	CodeDuplicateExecution Code = 4003
+
+	// CodeExecutorDraining 表示 executor 正在优雅关闭（draining），
+	// 不再接受新任务触发。调度器收到此错误后应将任务路由到其他实例。
+	// HTTP 层返回 503 Service Unavailable。
+	CodeExecutorDraining Code = 4004
+
 	// Auth errors 50xx
 	CodeLoginFail       Code = 5001
 	CodeTokenExpired    Code = 5002
@@ -70,6 +79,9 @@ var codeMessages = map[Code]string{
 	CodeLockFail:    "acquire lock failed",
 	CodeLockTimeout: "lock timeout",
 
+	CodeDuplicateExecution: "duplicate execution: same log_id already running",
+	CodeExecutorDraining:   "executor is draining, no new jobs accepted",
+
 	CodeLoginFail:     "login failed",
 	CodeTokenExpired:  "token expired",
 	CodeTokenInvalid:  "token invalid",
@@ -96,6 +108,10 @@ func (c Code) HTTPStatus() int {
 		return http.StatusUnauthorized
 	case CodeForbidden:
 		return http.StatusForbidden
+	case CodeDuplicateExecution:
+		return http.StatusConflict // 409
+	case CodeExecutorDraining:
+		return http.StatusServiceUnavailable // 503
 	case CodeNotFound, CodeJobNotFound, CodeExecutorNotFound:
 		return http.StatusNotFound
 	default:
