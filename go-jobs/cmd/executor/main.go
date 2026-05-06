@@ -46,12 +46,26 @@ func main() {
 	)
 	defer logger.Sync()
 
-	// ── Handler registry ─────────────────────────────────────────────────────
+	// ── Handler registry（BEAN 模式） ─────────────────────────────────────────
 	registry := executor.NewRegistry()
 	registerHandlers(registry)
 
+	// ── Script engine registry ────────────────────────────────────────────────
+	engineRegistry := executor.NewScriptEngineRegistry()
+	if len(cfg.Executor.ScriptEngines) > 0 {
+		engineConfigs := confToEngineConfigs(cfg.Executor.ScriptEngines)
+		if err := engineRegistry.LoadFromConfig(engineConfigs); err != nil {
+			logger.Warn("executor: some script engines failed to register", zap.Error(err))
+		}
+	}
+
 	// ── Job runner ───────────────────────────────────────────────────────────
-	runner := executor.NewRunner(registry)
+	// WithGracefulTimeout 设置优雅关闭时最多等待存量任务完成的时间。
+	// 超出后强制 cancel 所有剩余任务再退出。
+	runner := executor.NewRunner(registry,
+		executor.WithScriptEngineRegistry(engineRegistry),
+		executor.WithGracefulTimeout(30*time.Second),
+	)
 
 	// ── Auto-registrar (heartbeat to admin) ──────────────────────────────────
 	port := cfg.Executor.Port
@@ -79,7 +93,12 @@ func main() {
 	r.Use(middleware.Recovery(), middleware.RequestLogger())
 
 	r.GET("/health", func(c *gin.Context) {
-		c.JSON(200, gin.H{"status": "ok", "address": address})
+		c.JSON(200, gin.H{
+			"status":         "ok",
+			"address":        address,
+			"script_engines": engineRegistry.Types(),
+			"draining":       runner.IsStopped(),
+		})
 	})
 
 	internalToken := "go-jobs-internal"
@@ -107,33 +126,72 @@ func main() {
 
 	// ── Start HTTP server ─────────────────────────────────────────────────────
 	go func() {
-		logger.Info("executor listening", zap.String("addr", srv.Addr), zap.String("address", address))
+		logger.Info("executor listening",
+			zap.String("addr", srv.Addr),
+			zap.String("address", address),
+			zap.Strings("script_engines", engineRegistry.Types()),
+		)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Fatal("executor listen failed", zap.Error(err))
 		}
 	}()
 
 	// ── Graceful shutdown ─────────────────────────────────────────────────────
+	// 关闭顺序（严格有序）：
+	//  1. 收到 SIGINT/SIGTERM
+	//  2. 先从调度器注销：停止心跳，让调度器不再向本实例分配新任务
+	//  3. 关闭 HTTP server：停止接受来自调度器的新 /run 请求
+	//  4. runner.Stop()：两阶段等待存量任务结束（最多 30s）再强制 cancel
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	logger.Info("executor shutting down...")
-	registrar.Stop()
+	logger.Info("executor: received shutdown signal")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	_ = srv.Shutdown(ctx)
-	logger.Info("executor stopped")
+	// Step 1: 注销，让调度器停止向本实例分配新任务
+	registrar.Stop()
+	logger.Info("executor: deregistered from scheduler")
+
+	// Step 2: 关闭 HTTP server，不再接受新的 /run 触发
+	httpCtx, httpCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer httpCancel()
+	if err := srv.Shutdown(httpCtx); err != nil {
+		logger.Warn("executor: HTTP server shutdown error", zap.Error(err))
+	}
+	logger.Info("executor: HTTP server closed")
+
+	// Step 3: 两阶段优雅关闭 Runner
+	//   - 阶段一：标记 stopped，Run() 立即拒绝新请求
+	//   - 阶段二：等待存量任务自然结束（上限 30s），超时则强制 cancel
+	logger.Info("executor: draining in-flight jobs (max 30s)...")
+	runner.Stop()
+
+	logger.Info("executor: shutdown complete")
 }
 
-// registerHandlers is where you add your application-specific job handlers.
-// Each handler must be registered under the same name used in job_info.execute_handler.
+// confToEngineConfigs 将 pkg/conf 层的配置转换为 executor 层的 EngineConfig。
+func confToEngineConfigs(cfgList []conf.ScriptEngineConfig) []executor.EngineConfig {
+	result := make([]executor.EngineConfig, 0, len(cfgList))
+	for _, c := range cfgList {
+		result = append(result, executor.EngineConfig{
+			Type:           c.Type,
+			Binary:         c.Binary,
+			Args:           c.Args,
+			FileExt:        c.FileExt,
+			WorkDir:        c.WorkDir,
+			Env:            c.Env,
+			ExecMode:       c.ExecMode,
+			MaxOutputBytes: c.MaxOutputBytes,
+			Disabled:       c.Disabled,
+		})
+	}
+	return result
+}
+
+// registerHandlers 注册业务 BEAN Handler。
 func registerHandlers(r *executor.Registry) {
-	// Example: a simple demo handler
 	r.Register("demoJob", func(ctx context.Context, param string) error {
 		logger.Info("demoJob executed", zap.String("param", param))
-		// Simulate some work.
 		select {
 		case <-time.After(2 * time.Second):
 			return nil
@@ -142,7 +200,6 @@ func registerHandlers(r *executor.Registry) {
 		}
 	})
 
-	// Example: a sharding-aware handler
 	r.Register("shardingDemoJob", func(ctx context.Context, param string) error {
 		jc, ok := executor.GetJobContext(ctx)
 		if !ok {
