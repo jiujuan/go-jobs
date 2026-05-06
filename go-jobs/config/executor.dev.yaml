@@ -1,0 +1,28 @@
+# ============================================================
+# go-jobs executor configuration
+# Environment: development
+# ============================================================
+
+app:
+  name: go-jobs-executor
+  env: dev
+  version: "1.0.0"
+
+server:
+  mode: debug
+
+logger:
+  level: debug
+  filename: "logs/executor.log"
+  max_size_mb: 50
+  max_backups: 5
+  max_age_days: 7
+  compress: true
+  json: false
+
+executor:
+  app_name: "go-jobs-example-executor"
+  address: ""         # auto-detected if empty (ip:port)
+  port: 9901
+  admin_url: "http://127.0.0.1:8080"  # scheduler admin base URL
+  timeout: 60s

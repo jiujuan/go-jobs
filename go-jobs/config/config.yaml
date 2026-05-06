@@ -1,0 +1,68 @@
+# ============================================================
+# go-jobs admin (scheduler centre) configuration
+# Environment: development
+# ============================================================
+
+app:
+  name: go-jobs
+  env: dev
+  version: "1.0.0"
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  read_timeout: 30s
+  write_timeout: 30s
+  mode: debug   # debug | release
+
+mysql:
+  dsn: "root:password@tcp(127.0.0.1:3306)/go_jobs?charset=utf8mb4&parseTime=True&loc=Local"
+  max_open_conns: 50
+  max_idle_conns: 10
+  conn_max_lifetime: 1h
+  conn_max_idle_time: 30m
+  slow_threshold: 200ms
+  log_level: warn   # silent | error | warn | info
+
+redis:
+  addr: "127.0.0.1:6379"
+  password: ""
+  db: 0
+  pool_size: 20
+  min_idle_conns: 5
+  dial_timeout: 5s
+  read_timeout: 3s
+  write_timeout: 3s
+
+etcd:
+  endpoints:
+    - "127.0.0.1:2379"
+  dial_timeout: 5s
+
+es:
+  addresses:
+    - "http://127.0.0.1:9200"
+  username: ""
+  password: ""
+  index: "go-jobs-logs"
+  enabled: false
+
+logger:
+  level: debug           # debug | info | warn | error
+  filename: "logs/admin.log"
+  max_size_mb: 100
+  max_backups: 7
+  max_age_days: 30
+  compress: true
+  json: false
+
+scheduler:
+  preload_duration: 5s
+  heartbeat_timeout: 30s
+  node_id: ""            # auto-set to ip:port if empty
+  use_redis_lock: true
+  internal_token: "go-jobs-internal"   # shared secret for executor → scheduler API
+
+jwt:
+  secret: "go-jobs-jwt-secret-change-in-prod"
+  expire_duration: 24h

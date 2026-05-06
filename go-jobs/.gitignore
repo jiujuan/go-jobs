@@ -1,0 +1,33 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of go tool
+*.out
+
+# Dependency cache
+vendor/
+
+# Logs
+logs/
+*.log
+
+# Config overrides (keep dev configs, ignore prod secrets)
+config/*.prod.yaml
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

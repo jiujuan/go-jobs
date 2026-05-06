@@ -1,0 +1,103 @@
+version: "3.9"
+
+# ============================================================
+# go-jobs: full local dev stack
+# Usage: docker compose up -d
+# ============================================================
+
+services:
+
+  # ── MySQL ───────────────────────────────────────────────────
+  mysql:
+    image: mysql:8.0
+    container_name: go-jobs-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: "password"
+      MYSQL_DATABASE: "go_jobs"
+      MYSQL_CHARSET: utf8mb4
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./migration/V1__init_schema.sql:/docker-entrypoint-initdb.d/01_init.sql
+      - ./migration/V2__alarm_and_stats.sql:/docker-entrypoint-initdb.d/02_alarm.sql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-ppassword"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis ───────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: go-jobs-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Scheduler / Admin ───────────────────────────────────────
+  admin:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.admin
+    container_name: go-jobs-admin-server
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      GOJOBS_MYSQL_DSN: "root:password@tcp(mysql:3306)/go_jobs?charset=utf8mb4&parseTime=True&loc=Local"
+      GOJOBS_REDIS_ADDR: "redis:6379"
+      GOJOBS_SERVER_MODE: "release"
+      GOJOBS_LOGGER_LEVEL: "info"
+    volumes:
+      - ./config/config.yaml:/app/config/config.yaml:ro
+      - admin_logs:/app/logs
+
+  # ── Executor (example instance) ─────────────────────────────
+  executor:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.executor
+    container_name: go-jobs-executor-1
+    restart: unless-stopped
+    depends_on:
+      - admin
+    environment:
+      GOJOBS_EXECUTOR_ADMINURL: "http://admin:8080"
+      GOJOBS_EXECUTOR_PORT: "9901"
+      GOJOBS_LOGGER_LEVEL: "info"
+    volumes:
+      - ./config/executor.dev.yaml:/app/config/executor.dev.yaml:ro
+      - executor_logs:/app/logs
+
+  # ── Frontend admin UI (nginx) ────────────────────────────────
+  frontend:
+    image: nginx:alpine
+    container_name: go-jobs-frontend
+    restart: unless-stopped
+    depends_on:
+      - admin
+    ports:
+      - "80:80"
+    volumes:
+      - ./go-jobs-admin/dist:/usr/share/nginx/html:ro
+      - ./deploy/docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
+volumes:
+  mysql_data:
+  redis_data:
+  admin_logs:
+  executor_logs:
