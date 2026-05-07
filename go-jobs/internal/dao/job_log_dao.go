@@ -24,13 +24,44 @@ type JobLogDAO interface {
 	FindDetail(ctx context.Context, logID int64) (*model.JobLogDetail, error)
 }
 
+// BatchJobLogDAO extends JobLogDAO with a bulk-insert method.
+// logbuffer.Buffer detects this interface and uses CreateBatch instead of
+// calling Create N times, reducing DB round-trips to a single multi-row INSERT.
+type BatchJobLogDAO interface {
+	JobLogDAO
+	// CreateBatch inserts multiple JobLog records in one DB round-trip.
+	// The ID field of every record in logs is set to the real auto-increment
+	// value after a successful insert.
+	CreateBatch(ctx context.Context, logs []*model.JobLog) error
+}
+
 type jobLogDAO struct{ db *gorm.DB }
 
 // NewJobLogDAO returns a GORM-backed JobLogDAO.
-func NewJobLogDAO(db *gorm.DB) JobLogDAO { return &jobLogDAO{db: db} }
+// The returned value also satisfies BatchJobLogDAO so that logbuffer.Buffer
+// can use the optimised CreateBatch path automatically.
+func NewJobLogDAO(db *gorm.DB) BatchJobLogDAO { return &jobLogDAO{db: db} }
 
 func (d *jobLogDAO) Create(ctx context.Context, l *model.JobLog) error {
 	return d.db.WithContext(ctx).Create(l).Error
+}
+
+// CreateBatch inserts multiple JobLog records in a single multi-row INSERT.
+//
+// GORM's Create(slice) issues one INSERT … VALUES (…),(…),… statement and
+// back-fills the auto-increment ID on each element using the first inserted ID
+// returned by LastInsertId plus a monotonically-increasing offset.  This is
+// correct for MySQL because MySQL guarantees that a multi-row INSERT allocates
+// contiguous IDs in the order of the rows.
+//
+// If the batch is empty the call is a no-op.
+func (d *jobLogDAO) CreateBatch(ctx context.Context, logs []*model.JobLog) error {
+	if len(logs) == 0 {
+		return nil
+	}
+	// GORM v2 handles pointer-slice batch insert correctly:
+	// it dereferences each element, issues one INSERT, and sets the ID fields.
+	return d.db.WithContext(ctx).Create(logs).Error
 }
 
 func (d *jobLogDAO) UpdateResult(

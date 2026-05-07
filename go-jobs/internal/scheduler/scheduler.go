@@ -76,8 +76,8 @@ type Scheduler struct {
 	wg      sync.WaitGroup
 
 	// 功能扩展
-	rateLimiter  *ratelimit.Registry  // 任务限流与配额（可为 nil，不限流）
-	paramEngine  *paramtpl.Engine     // 参数模板渲染引擎（可为 nil，不渲染）
+	rateLimiter *ratelimit.Registry // 任务限流与配额（可为 nil，不限流）
+	paramEngine *paramtpl.Engine    // 参数模板渲染引擎（可为 nil，不渲染）
 }
 
 // Options configures the Scheduler.
@@ -247,7 +247,7 @@ func (s *Scheduler) bootstrap() error {
 		query.Page++
 	}
 
-	// ── 2. 加载执行器到内存 executorstore（单次 DB 查询，后续热路径无 DB）
+	// ── 2. 加载执行器到内存 executorstore（单次 DB 查询，后续无 DB）
 	if s.executorStore != nil {
 		executors, err := s.executorDAO.ListOnline(ctx)
 		if err != nil {

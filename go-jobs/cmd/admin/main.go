@@ -24,6 +24,7 @@ import (
 	"github.com/jiujuan/go-jobs/internal/service"
 	"github.com/jiujuan/go-jobs/pkg/executorstore"
 	"github.com/jiujuan/go-jobs/pkg/jobtpl"
+	"github.com/jiujuan/go-jobs/pkg/logbuffer"
 	"github.com/jiujuan/go-jobs/pkg/paramtpl"
 	"github.com/jiujuan/go-jobs/pkg/ratelimit"
 	"github.com/jiujuan/go-jobs/pkg/conf"
@@ -113,9 +114,21 @@ func main() {
 
 	// ── DAOs ──────────────────────────────────────────────────────────────────
 	jobDAO := dao.NewJobInfoDAO(db)
-	logDAO := dao.NewJobLogDAO(db)
+	rawLogDAO := dao.NewJobLogDAO(db) // GORM-backed; also satisfies BatchCreator
 	executorDAO := dao.NewExecutorDAO(db)
 	userDAO := dao.NewUserDAO(db)
+
+	// ── Buffered log DAO（批量写入缓冲区，大幅减少 DB 连接占用）─────────────
+	// logbuffer.Buffer 收集 JobLog 记录，累积到 batchSize 或超过 flushInterval
+	// 时批量 INSERT，单次 DB 往返写入多行，调用方语义不变（Create 返回时 ID 已有效）。
+	logBuf := logbuffer.New(rawLogDAO,
+		logbuffer.WithBatchSize(500),
+		logbuffer.WithFlushInterval(2*time.Second),
+		logbuffer.WithRingCap(2000),
+	)
+	logBuf.Start()
+	// logDAO 是 dao.JobLogDAO 接口类型，Buffer 满足该接口
+	logDAO := dao.JobLogDAO(logBuf)
 
 	// ── Scheduler ─────────────────────────────────────────────────────────────
 	nodeID := cfg.Scheduler.NodeID
@@ -427,6 +440,12 @@ func main() {
 	} else {
 		sched.Stop()
 	}
+
+	// Flush remaining log records before closing DB connections.
+	// logBuf.Stop() drains the ring buffer and waits for the flush goroutine,
+	// ensuring no job_log rows are silently dropped on shutdown.
+	logBuf.Stop()
+	applogger.Info("log buffer flushed")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

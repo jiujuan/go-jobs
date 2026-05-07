@@ -45,7 +45,7 @@ es:
   username: ""
   password: ""
   index: "go-jobs-logs"
-  enabled: true
+  enabled: false
 
 logger:
   level: debug           # debug | info | warn | error

@@ -1,6 +1,6 @@
 # go-jobs — 分布式任务调度平台
 
-> Go 实现，企业级分布式任务调度系统
+> 类 xxl-job 的 Go 实现，企业级分布式任务调度系统
 
 [![Go Version](https://img.shields.io/badge/Go-1.21+-blue.svg)](https://go.dev/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
